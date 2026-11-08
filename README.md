@@ -1,144 +1,110 @@
 # Project Cognition Map
 
-让项目 Agent 记住：你已经理解到哪里，下次应该从哪里接着讲。
+**让 Codex 从你已经理解的地方接着讲。**
 
-当你会看实验结果，却还不懂某个机制时，AI 容易从头重复定义，或直接跳到你接不上的结论。这个 Skill 维护项目内的知识边界，让回答省掉已经会的部分，把解释用在当前缺少的因果连接上。
+一个为 Codex CLI 提供项目级理解记忆的 Skill。读代码、分析实验、审阅改动时，它从自然对话中判断你已经掌握哪些知识，让 Agent 省掉熟悉的基础，把缺失的因果关系讲清楚。
 
-**当前定位：真实 Codex 链路已跑通的可试用版本。** 它从自然对话中作出可纠正的理解判断，仍需真实用户验证解释深度是否合适。
+全局安装一次，每个项目维护自己的 Markdown 地图。换会话可以继续使用；不同项目的理解边界分开保存。
 
-[验证报告](review/codex-live-validation.md) · [安装](#安装一次各项目独立生效) · [记忆文件](#记忆文件是什么样) · [Skill 规则](adapt-project-explanations/SKILL.md)
+[使用示例](#使用示例) · [快速开始](#快速开始) · [工作方式](#工作方式) · [文档](#文档)
 
-## 安装一次，各项目独立生效
+## 使用示例
 
-全局安装的是 Skill 和 Hook，记忆始终放在项目目录里：
+假设你已经能区分 prefill 和 decode，正在研究前缀缓存。下面是一段示意对话。
 
-```text
-~/.codex/cognition-runtime/adapt-project-explanations/  ← 全局规则与脚本
-~/.codex/hooks.json                                    ← 全局触发器
+**你问：**
 
-/work/proj-a/.know/map.md                    ← 只记录 A 项目知识边界
-/work/proj-b/.know/map.md                    ← 只记录 B 项目知识边界
+> 同一篇文档一个字没变，为什么换了开头的问题，后面的 KV 就不能复用？
+
+**Codex 从你卡住的地方解释：**
+
+> 文档里的 token 会受到前文影响。开头的问题变了，模型算出的中间表示也可能改变，进而影响后续层的 KV。所以即使文字相同，也不能仅凭文档相同就复用旧 KV。
+
+此时不会因为“已经解释过”就把这项记为掌握。后来你继续应用：
+
+> 那我把固定的系统提示和文档放前面，把每次变化的问题放最后，让文档看到相同的前文。
+
+这才提供了更新地图的依据。项目的 `.know/map.md` 可以逐步形成这样的树：
+
+```markdown
+# 已掌握
+
+## KV cache
+- Prefill 与 decode 的分工
+- 前缀复用
+  - 相同文本在不同前文下的 KV 可能不同
 ```
 
-不需要给每个项目重复安装。第一次在项目中发消息时，Hook 自动创建该项目的空地图。Git 项目使用仓库根目录，子目录沿用同一份地图；另一个 Git 仓库或 worktree 使用自己的文件。非 Git 项目应先从项目根启动，之后子目录沿用最近的已有地图。非 Git 首次从子目录启动时，程序无法猜出上层项目边界，会把该目录作为项目根。
+下次追问“最后只有半个块怎么办”，Agent 从块粒度继续讲，保留已有的上层知识；等后续讨论表明你也理解了这一层，再增加子节点。
 
-需要 Git、Python **3.9+** 和支持 `UserPromptSubmit` / `Stop` 的 Codex CLI。本轮实测 **Windows、Codex CLI 0.164.0、Python 3.9.13、配置模型 gpt-6-astra**；其他版本及 Linux/macOS 本轮未实测。
+**每行只记录知识边界，缩进表示理解深度。** 不需要测验、复述或逐轮确认。地图不写评分、完整定义和对话流水账；你可以随时查看和纠正。
+
+## 快速开始
+
+需要 **Git、Python 3.9+**，以及支持 `UserPromptSubmit` 和 `Stop` Hook 的 **Codex CLI**。
+
+### 1. 获取仓库
 
 ```sh
 git clone https://github.com/Ben-cpy/BOOK.git
 cd BOOK
 ```
 
-Windows（可用 `py -0p` 查看 Python，并换用更高版本）：
+### 2. 全局安装
+
+**Windows**
 
 ```powershell
 py -3.9 -X utf8 adapt-project-explanations/scripts/install.py --global
 codex -C "C:\path\to\your-project"
 ```
 
-Linux/macOS：
+可用 `py -0p` 查看已安装的 Python，并换用更高版本。
+
+<details>
+<summary>Linux / macOS（本轮未实测）</summary>
 
 ```sh
 python3 adapt-project-explanations/scripts/install.py --global
 codex -C /work/proj-a
 ```
 
-在启动提示或 `/hooks` 中审阅并信任 **UserPromptSubmit、Stop 两个 Project Cognition Map Hook**，检查均为 Active。随后正常讨论项目即可。若 Codex 要求信任当前项目，也需完成项目授权。安装器不替用户授予信任。
+</details>
 
-全局安装会复制 Skill、脚本和格式说明，因此不依赖克隆仓库一直留在原地。规则由 Hook 自动注入，不额外注册到 Skill 选择器，避免模型重复加载并播报技能名称。更新代码后重新运行安装器；已有配置和 Skill 副本各备份一次，其他 Hook 保留。定义改变后重新检查信任状态。自定义 `CODEX_HOME` 会同时用于用户 Hook 配置和默认运行目录。
+### 3. 启用并开始对话
 
-只想启用单个项目时，仍支持：
+在 Codex 的启动提示或 `/hooks` 中，审阅并信任 **Project Cognition Map** 的 `UserPromptSubmit`、`Stop` 两个 Hook，确认均为 **Active**。如果提示项目信任，也需完成授权。
 
-```sh
-python3 adapt-project-explanations/scripts/install.py --project /work/proj-a
-```
+随后照常讨论项目，无需手动调用 Skill。首次使用时，该项目的 `.know/map.md` 从只有 `# 已掌握` 的空地图开始，随对话逐步更新；上面的示例知识不会自动导入。
 
-单项目模式引用本仓库脚本，移动后需重新安装。新版本全局和本地 Hook 同时启用也只注入一次；已有旧版单项目安装应先重跑安装器更新。用户主目录在没有项目时不会被用作全局记忆文件。
+安装器保留已有地图和其他 Hook。升级时拉取仓库更新，再运行一次安装命令；若 Hook 定义改变，需要重新审阅信任。
 
-## 实际体验怎么变
+## 工作方式
 
-| 你在做什么 | Agent 应该怎么回答 | 地图怎么处理 |
-|---|---|---|
-| 首次问 prefill/decode 区别 | 用通俗的因果解释讲清楚 | 刚讲完不等于掌握，先不记 |
-| 能根据 TTFT/TPOT 审阅结果 | 从已有基础继续分析 | 记录这部分窄边界 |
-| 不懂“相同文档为何不能复用 KV” | 补“前文改变 → 中间表示改变 → 后层 KV 可能改变” | 不把刚解释的内容立刻写入 |
-| 据此把固定文档放在变化问题前面 | 继续讨论实际命中条件 | 记录已应用的知识 |
-| 追问最后半个块怎么办 | 深入块粒度 | 保留上层，等后续理解再加子节点 |
-| 换话题，或仅说“嗯，先这样” | 正常回应 | 不凭这一点新增掌握 |
-| 说明“刚才只是照抄，其实没懂” | 补上缺失连接 | 缩小对应记录，保留其他知识 |
+1. **读当前项目的地图。** 你发消息时，Hook 自动注入 Skill 规则和已掌握的知识边界。
+2. **从合适的深度回答。** Agent 结合地图与当前问题决定省讲什么、补讲什么。没有记录的知识，仍由当前对话判断。
+3. **有新证据才更新。** 正确应用、后续相关讨论可以支持新增节点。仅仅换话题不会自动新增；发现误判就缩小记录。候选地图通过格式与并发检查后才保存。
 
-无需复述、测验或逐轮确认。判断依据是自然追问、实际应用和后续相关讨论。
-
-## 记忆文件是什么样
-
-每个项目的 `.know/map.md` 初始只有：
-
-```markdown
-# 已掌握
-```
-
-下面是本次真实 Codex 对话保存的地图节选；这些知识不会随安装导入：
-
-```markdown
-# 已掌握
-
-## 大模型推理性能
-- Prefill 与 decode 的阶段区别
-- TTFT 与 TPOT
-  - 延迟体验与指标区分
-- 前缀缓存
-  - KV 对前文上下文的依赖
-  - 固定系统提示与文档在前、变化问题在后的请求排列
-  - 完整块命中与不足一块的公共前缀重算
-```
-
-每行只标出知识边界，缩进表示更具体的理解。不保存评分、状态、完整定义、对话原文或学习流水账。没记录不等于不懂，Agent 仍要结合当前问题判断深度。你可以直接查看、纠正文件（UTF-8、LF 换行）。
-
-## 自动运行靠什么
+全局安装的是规则和触发器，记忆文件始终属于项目：
 
 ```text
-普通项目消息
-    ↓ UserPromptSubmit：识别项目、注入 Skill + 地图 + 本轮候选位置
-模型回答，并判断这轮是否提供了新的理解证据
-    ↓ 有变化才写候选；没有变化就正常结束
-Stop：校验格式、检查其他会话是否改过地图
-    ↓
-原子保存并清理；冲突时请求一次重新合并
+/work/proj-a/.know/map.md   # A 项目的理解边界
+/work/proj-b/.know/map.md   # B 项目的理解边界
 ```
 
-Skill 决定“怎么解释、什么可以记”；代码保证“每轮加载、合格后保存”。格式正确不能证明用户已经理解，误判靠后续证据或用户修改来纠正。
+Git 项目的子目录沿用仓库根目录的地图。非 Git 项目第一次请从项目根目录启动。只想启用单个项目，也可以用 `--project <项目路径>` 替代 `--global`。
 
-## 已验证到哪一步
+## 验证与当前边界
 
-- **真实 Codex**：自动注入、模型写候选、Stop 保存；从空图起步、自然应用后增加层级、新会话使用地图、纠正误判、无更新时无维护播报。
-- **真实异常验证**：模型写错格式后被拦截并修复；注入并发改动后重新合并；候选生成后强制中断进程，再恢复清理旧候选。
-- **36 项自动回归通过**：中文/空格路径、重复安装、同组 Hook 共存、重复事件、嵌套项目隔离、双进程保存，以及全局/本地同时执行只注入一次、冲突重试不丢基线。
-- **独立角色试用**：三个 Agent 扮演指标初学者、向下追问者、跨会话用户，累计 21 次真实 CLI 交互。用户角色是合成的，不等于真实用户审批。[指标](review/persona-metrics.md) · [深度](review/persona-depth.md) · [跨会话](review/persona-transfer.md)
+已在 **Windows · Codex CLI 0.164.0 · Python 3.9.13 · gpt-6-astra** 下验证自动注入、模型更新、Stop 保存和跨项目隔离，**36 项回归检查通过**。三个模拟用户角色还进行了 21 次真实 CLI 交互。[查看测试与实际地图变化 →](review/codex-live-validation.md)
 
-[真实环境与异常证据](review/codex-live-validation.md) · [全局安装与项目隔离验证](review/global-install-validation.md)。原有[行为案例](review/vllm-kv-oneshots.md)仍待用户审批。
+理解判断仍由模型推断，可能记得过宽或解释偏长；异常修复时也可能产生一次续答。模拟用户试用不等于实际用户验收，其他平台与模型尚未实测。
 
-本地检查（Windows 将 `python3` 换为 `py -3.9 -X utf8`）：
+地图会作为上下文发送给你配置的模型服务；生产 Hook 不保存完整对话。每个项目目前默认由同一位用户使用。
 
-```sh
-python3 -m unittest discover -s adapt-project-explanations/tests -v
-python3 adapt-project-explanations/scripts/know.py validate adapt-project-explanations/references/map.example.md
-```
+## 文档
 
-可选的真实会话复跑使用当前 Codex 配置与模型额度，在临时 Git 项目中输出证据。先审阅 Hook 代码；此测试驱动对单次调用绕过 Hook 信任，日常使用仍走 `/hooks`：
-
-```sh
-python3 adapt-project-explanations/tests/live_codex.py --scenario adapt-project-explanations/tests/scenarios/kv-cache.json
-```
-
-驱动退出成功不等于语义测试通过，仍需检查回答、地图与 `hook-events.jsonl`。
-
-## 当前限制与隐私
-
-- 每个项目默认面向同一用户；尚无多人身份隔离。
-- 正确表述可能只是照抄。模型也可能漏记、记得过宽或讲得偏长；已验证纠正路径，未证明长期准确率。
-- 正常回合不播报维护。异常修复可能产生一次续答或重复回答，不能承诺完全无感。
-- 中断候选在同一会话下次输入时清理。永不恢复的会话可能留下临时目录，确认会话结束后可删除；不会自动提交这些候选。
-- 锁只协调遵守协议的写入，无法保证外部编辑器恰好在保存瞬间写文件时也没有竞争。
-- 生产 Hook 不记录对话原文；地图作为上下文发送到当前配置的模型服务。Codex 自身的会话记录由 Codex 管理。测试驱动会额外保存合成对话证据。
-
-若未自动运行，先检查新会话的 `/hooks` 是否 Active、Python 版本和脚本位置；无写入权限的会话不能保存候选。运行文件加入项目的本地 Git 忽略规则。[完整协议](adapt-project-explanations/references/map-format.md) · [官方 Hook 文档](https://learn.chatgpt.com/docs/hooks)
+- [Skill 规则](adapt-project-explanations/SKILL.md) — 如何选择解释深度、判断理解和修正记录。
+- [安装细节与地图格式](adapt-project-explanations/references/map-format.md) — 项目边界、单项目安装、临时文件与 Hook 协议。
+- [真实 Codex 验证](review/codex-live-validation.md) — 完整对话、发现的问题、修复与剩余限制。
+- [全局安装与项目隔离](review/global-install-validation.md) — 不同项目各自保存和读取地图的实测证据。
