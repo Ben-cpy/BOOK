@@ -1,39 +1,19 @@
-# Local map format
+# Map and hook contract
 
-A map contains a project ID, topic headings, and nested boundary labels. See the [synthetic example](map.example.md). The visible tree answers where the next explanation can start. Inline comments store only a stable node ID, an update reason, and the supporting user-turn IDs.
+The [sample map](map.example.md) is illustrative. Installation creates an empty map.
 
-To enable a project on request, create .know/map.md with just the title and Project line. Keep this directory outside tracked project content, for example through a local Git exclude. Sample identifiers are synthetic.
+The first line is exactly `# 已掌握`. Topic headings start with `## `. Knowledge labels are plain Markdown bullets, using two spaces per nested level. A parent must exist before a child. Labels are at most 80 characters, depth at most four levels, and the entire map at most 60 entries and 16 KiB. These are size limits, not a learning model. Duplicate siblings, state tags, inline metadata, empty topics, and broken indentation are rejected.
 
-The exact row syntax is:
+The project root determines scope. Runtime files stay in `.know/`.
 
-```markdown
-- [可直接讲] 前缀一致性与连续命中 <!-- prefix-match | used | s01:t02 -->
-  - [待厘清] 未填满的块能否跨请求复用 <!-- partial-block | frontier | s01:t04 -->
-```
+- `map.md` contains the current understanding tree.
+- `pending/<turn hash>/` contains a base snapshot and an optional candidate. Completed turns are cleaned up. Interrupted or failed turns may leave staging files, which can be deleted when that session has ended.
+- `map.lock` serializes updates made through the hook.
 
-Use printable UTF-8, LF newlines with a final newline, one blank line before each topic heading, and two spaces for each deeper level. Topic names and boundary labels are short, with a limit of 56 characters. The map allows 24 boundaries and at most four boundary levels. Node IDs must be unique among siblings. Project IDs, node IDs and the two parts of a session:turn ID are lowercase ASCII slugs of up to 48 characters.
+`UserPromptSubmit` injects the skill and current map. It captures a snapshot for that session and turn. `Stop` validates an optional candidate and atomically replaces the map if the base still matches. A concurrent change causes a retry against the new map. Repeated validation failure leaves the live map untouched and reports the problem.
 
-| State | Reason | Distinct user turns |
-| --- | --- | --- |
-| 可直接讲 | used | 1 |
-| 可直接讲 | continued | 2 |
-| 待厘清 | frontier | 1 |
-| 补桥 | repeated | 2 |
-| 补桥 | reopened | 1 |
+The installer merges these two command hooks into project `.codex/hooks.json` and backs up the original configuration once. Keep the cloned repository at its installed path, or rerun the installer after moving it. Codex requires trust for local hook commands through `/hooks`.
 
-A new frontier requires a direct parent. A frontier can move to direct or to bridge. A bridge can move to direct. A direct boundary can reopen as a bridge. A frontier promoted to bridge may reuse the frontier's source as the first of its two turns. Automatic updates preserve labels and ordering and touch one boundary.
+The adapter targets Codex CLI hook events with `session_id`, `turn_id`, `cwd`, and `hook_event_name`. It uses Python 3.10+ and POSIX file locks on Linux/macOS. The validator checks structure and safe writes. The model remains responsible for the meaning and scope of an update. Filesystem writes outside this adapter are governed by the host's permissions.
 
-## Commands
-
-Set cognition_skill_dir to the directory containing SKILL.md.
-
-```sh
-python3 "$cognition_skill_dir/scripts/know.py" validate .know/map.md --project vllm-kv
-python3 "$cognition_skill_dir/scripts/know.py" apply .know/map.md --project vllm-kv \
-  --candidate "$cognition_candidate" --expected-sha256 "$cognition_snapshot_sha" \
-  --user-turns "$cognition_host_index"
-```
-
-For a write, copy the live map to a temporary snapshot, validate that copy to get its SHA-256, and produce the candidate from that snapshot. The host index is an ordered JSON object like {"project":"vllm-kv","user_turns":["s01:t02","s01:t04"]}. It must come from the host and include both the old and proposed evidence for a transition. The script checks membership and chronology against this input. The host establishes which turns really came from the user.
-
-The local validator uses only the Python standard library. Applying a change uses a POSIX lock for concurrent script writers and atomic replacement. This repository provides an explicit skill invocation and an apply interface. A host hook and trusted index producer are integration work. Keep live maps, lock files, and real host indices out of version control.
+[Codex hook reference](https://learn.chatgpt.com/docs/hooks)

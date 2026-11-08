@@ -1,166 +1,137 @@
-import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
+import tempfile
 import unittest
 
-
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "know.py"
-PROJECT = "vllm-kv"
-EMPTY = "# Project Cognition Map\nProject: vllm-kv\n"
-TOPIC = EMPTY + "\n## 前缀复用\n"
-DIRECT = "- [可直接讲] 前缀一致性与连续命中 <!-- prefix-match | used | s01:t02 -->\n"
-FRONTIER = "  - [待厘清] 未填满的块能否跨请求复用 <!-- partial-block | frontier | s01:t04 -->\n"
-BRIDGE = "- [补桥] 命中对首 token 与后续生成延迟的影响 <!-- latency-scope | repeated | s01:t06, s01:t08 -->\n"
-CONTINUED = BRIDGE.replace("[补桥]", "[可直接讲]").replace(
-    "repeated | s01:t06, s01:t08", "continued | s01:t10, s01:t12"
-)
-REOPENED = BRIDGE.replace("repeated | s01:t06, s01:t08", "reopened | s02:t01")
-TURN_IDS = [f"s01:t{i:02d}" for i in (2, 4, 6, 8, 10, 12)] + ["s02:t01"]
+SCRIPTS = ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+from know import EMPTY, validate
+from hook import run
+from install import install
+
+MAP = "# 已掌握\n\n## KV cache\n- 前缀复用\n  - 相同文本在不同前文下的 KV 可能不同\n"
 
 
-class KnowCliTest(unittest.TestCase):
+class CognitionTest(unittest.TestCase):
     def setUp(self):
-        directory = TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        root = Path(directory.name)
-        self.map = root / "map.md"
-        self.candidate = root / "candidate.md"
-        self.index = root / "user-turns.json"
-        self.set_map(EMPTY)
-        self.write_index(PROJECT, TURN_IDS)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.project = Path(self.temporary.name) / "a project"
+        self.project.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+        install(self.project)
+        self.live = self.project / ".know/map.md"
 
-    def set_map(self, text):
-        self.map.write_bytes(text.encode("utf-8"))
+    def event(self, name, turn="t1", **extra):
+        return {"hook_event_name": name, "session_id": "s1", "turn_id": turn,
+                "cwd": str(self.project), **extra}
 
-    def write_index(self, project, turns):
-        self.index.write_text(json.dumps({"project": project, "user_turns": turns}), encoding="utf-8")
+    def submit(self, turn="t1"):
+        result = run(self.event("UserPromptSubmit", turn), self.project)
+        candidates = sorted((self.project / ".know/pending").glob("*/base.md"))
+        return result, candidates
 
-    def run_cli(self, *args):
-        return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
+    def candidate(self, turn="t1"):
+        from know import digest
+        key = digest(json.dumps(["s1", turn]).encode())[:32]
+        return self.project / ".know/pending" / key / "candidate.md"
 
-    def validate(self, project=PROJECT):
-        return self.run_cli("validate", self.map, "--project", project)
+    def test_format(self):
+        self.assertEqual(validate(MAP.encode()), MAP)
+        self.assertEqual(validate(EMPTY.encode()), EMPTY)
+        for text in (
+            MAP.replace("- 前缀复用", "- [可直接讲] 前缀复用"),
+            MAP + "解释段落\n",
+            MAP.replace("  -", "   -"),
+            MAP.replace("- 前缀复用\n", ""),
+            MAP + "- 前缀复用\n",
+            MAP.replace("\n", "\r\n"),
+            MAP + "\n## 空主题\n",
+        ):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                validate(text.encode())
 
-    def apply(self, proposed, snapshot=None):
-        self.candidate.write_bytes(proposed.encode("utf-8"))
-        if snapshot is None:
-            snapshot = self.map.read_bytes()
-        return self.run_cli(
-            "apply", self.map, "--project", PROJECT, "--candidate", self.candidate,
-            "--expected-sha256", hashlib.sha256(snapshot).hexdigest(), "--user-turns", self.index,
-        )
+    def test_install_preserves_existing_hooks_and_is_idempotent(self):
+        path = self.project / ".codex/hooks.json"
+        config = json.loads(path.read_text())
+        other = {"hooks": [{"type": "command", "command": "echo existing"}]}
+        config["hooks"]["UserPromptSubmit"].insert(0, other)
+        path.write_text(json.dumps(config))
+        install(self.project)
+        install(self.project)
+        actual = json.loads(path.read_text())
+        self.assertEqual(len(actual["hooks"]["UserPromptSubmit"]), 2)
+        self.assertEqual(actual["hooks"]["UserPromptSubmit"][0], other)
+        self.assertEqual(len(actual["hooks"]["Stop"]), 1)
+        self.assertIn("/.know/", (self.project / ".git/info/exclude").read_text())
 
-    def assert_refused(self, proposed, message, snapshot=None):
-        before = self.map.read_bytes()
-        result = self.apply(proposed, snapshot)
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn(message, result.stderr)
-        self.assertEqual(self.map.read_bytes(), before)
+    def test_installed_command_runs_with_spaces_and_in_subdirectory(self):
+        config = json.loads((self.project / ".codex/hooks.json").read_text())
+        command = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        sub = self.project / "sub"
+        sub.mkdir()
+        event = self.event("UserPromptSubmit", cwd=str(sub))
+        completed = subprocess.run(command, shell=True, cwd=sub, input=json.dumps(event),
+                                   text=True, capture_output=True, check=True)
+        result = json.loads(completed.stdout)
+        self.assertIn("# 已掌握", result["hookSpecificOutput"]["additionalContext"])
 
-    def test_valid_sample_and_empty_map(self):
-        sample = (ROOT / "references" / "map.example.md").read_text(encoding="utf-8")
-        self.assertEqual(sample, TOPIC + DIRECT + FRONTIER + BRIDGE)
-        for text in (EMPTY, sample):
-            self.set_map(text)
-            result = self.validate()
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), hashlib.sha256(text.encode()).hexdigest())
+    def test_load_save_and_cleanup(self):
+        result, _ = self.submit()
+        self.assertIn("candidate.md", result["hookSpecificOutput"]["additionalContext"])
+        self.candidate().write_text(MAP)
+        self.assertEqual(run(self.event("Stop"), self.project), {})
+        self.assertEqual(self.live.read_text(), MAP)
+        self.assertEqual(list((self.project / ".know/pending").iterdir()), [])
+        self.assertEqual(run(self.event("Stop"), self.project), {})
 
-    def test_rejects_malformed_maps(self):
-        active = TOPIC + BRIDGE
-        rows = {
-            "line ending": active.replace("\n", "\r\n"),
-            "final newline": active[:-1],
-            "metadata": TOPIC + "- [补桥] 项目边界\n",
-            "bad state": active.replace("[补桥]", "[待厘清]"),
-            "missing evidence": active.replace(", s01:t08", ""),
-            "duplicate evidence": active.replace("s01:t08", "s01:t06"),
-            "duplicate entry": active + BRIDGE,
-            "duplicate topic": active + "\n## 前缀复用\n" + BRIDGE,
-            "empty topic": active + "\n## 空主题\n",
-            "oversized label": active.replace("命中对首", "x" * 57),
-            "orphan": TOPIC + FRONTIER,
-            "odd indent": TOPIC + DIRECT + FRONTIER[1:],
-            "skipped level": TOPIC + DIRECT + "  " + FRONTIER,
-            "excessive depth": TOPIC + DIRECT + "".join("  " * i + DIRECT for i in range(1, 5)),
-            "too many boundaries": TOPIC + "".join(
-                DIRECT.replace("prefix-match", f"topic-{i}") for i in range(25)
-            ),
-        }
-        for name, text in rows.items():
-            with self.subTest(name=name):
-                self.set_map(text)
-                result = self.validate()
-                self.assertEqual(result.returncode, 1, result.stderr)
+    def test_no_update_creates_no_history(self):
+        self.submit()
+        run(self.event("Stop"), self.project)
+        self.assertEqual(self.live.read_text(), EMPTY)
+        self.assertEqual(list((self.project / ".know/pending").iterdir()), [])
 
-    def test_rejects_wrong_project(self):
-        self.assertIn("project mismatch", self.validate("other-project").stderr)
+    def test_invalid_candidate_retries_once_and_preserves_map(self):
+        self.submit()
+        self.candidate().write_text("bad")
+        result = run(self.event("Stop"), self.project)
+        self.assertEqual(result["decision"], "block")
+        result = run(self.event("Stop", stop_hook_active=True), self.project)
+        self.assertIn("systemMessage", result)
+        self.assertEqual(self.live.read_text(), EMPTY)
 
-    def test_full_reminder_lifecycle(self):
-        for entry in (BRIDGE, CONTINUED, REOPENED):
-            proposed = TOPIC + entry
-            result = self.apply(proposed)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(self.map.read_bytes(), proposed.encode())
+    def test_two_turns_cannot_overwrite_each_other(self):
+        self.submit("t1")
+        self.submit("t2")
+        self.candidate("t1").write_text(MAP)
+        self.candidate("t2").write_text(MAP.replace("前缀复用", "块分配"))
+        run(self.event("Stop", "t1"), self.project)
+        result = run(self.event("Stop", "t2"), self.project)
+        self.assertEqual(result["decision"], "block")
+        self.assertFalse(self.candidate("t2").exists())
+        self.assertEqual(self.live.read_text(), MAP)
+        self.candidate("t2").write_text(MAP + "- 块分配\n")
+        run(self.event("Stop", "t2", stop_hook_active=True), self.project)
+        self.assertEqual(self.live.read_text(), MAP + "- 块分配\n")
 
-    def test_direct_after_independent_use(self):
-        self.set_map(TOPIC + BRIDGE)
-        proposed = TOPIC + BRIDGE.replace("[补桥]", "[可直接讲]").replace(
-            "repeated | s01:t06, s01:t08", "used | s01:t10"
-        )
-        result = self.apply(proposed)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_repeated_question_can_remove_overstated_entry(self):
+        self.live.write_text(MAP)
+        self.submit()
+        self.candidate().write_text(EMPTY)
+        run(self.event("Stop"), self.project)
+        self.assertEqual(self.live.read_text(), EMPTY)
 
-    def test_adds_child_without_changing_parent(self):
-        self.set_map(TOPIC + DIRECT)
-        result = self.apply(TOPIC + DIRECT + FRONTIER)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.map.read_bytes(), (TOPIC + DIRECT + FRONTIER).encode())
+    def test_other_project_is_ignored(self):
+        self.assertEqual(run(self.event("UserPromptSubmit", cwd="/tmp"), self.project), {})
 
-    def test_requires_an_established_direct_parent(self):
-        self.assert_refused(TOPIC + FRONTIER.lstrip(), "requires a direct parent")
-        self.set_map(TOPIC + BRIDGE)
-        child = FRONTIER.replace("s01:t04", "s01:t10")
-        self.assert_refused(TOPIC + BRIDGE + child, "requires a direct parent")
-        self.set_map(TOPIC + DIRECT)
-        self.assert_refused(TOPIC + DIRECT + FRONTIER.replace("s01:t04", "s01:t02"), "chronological")
-
-    def test_promotes_child_after_second_question(self):
-        self.set_map(TOPIC + DIRECT + FRONTIER)
-        repeated = FRONTIER.replace("[待厘清]", "[补桥]").replace(
-            "frontier | s01:t04", "repeated | s01:t04, s01:t06"
-        )
-        result = self.apply(TOPIC + DIRECT + repeated)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_rejects_fake_or_cross_project_evidence(self):
-        self.assert_refused(TOPIC + BRIDGE.replace("s01:t08", "s01:t99"), "evidence missing")
-        self.write_index("other-project", ["s01:t06", "s01:t08"])
-        self.assert_refused(TOPIC + BRIDGE, "index project mismatch")
-
-    def test_rejects_stale_or_reused_evidence(self):
-        self.set_map(TOPIC + BRIDGE)
-        self.assert_refused(TOPIC + CONTINUED, "map changed since validation", EMPTY.encode())
-        self.assert_refused(TOPIC + CONTINUED.replace("s01:t10", "s01:t08"), "chronological")
-
-    def test_rejects_unsupported_changes(self):
-        self.assert_refused(TOPIC + CONTINUED, "invalid reason for a new boundary")
-        self.assert_refused(TOPIC + DIRECT + BRIDGE, "exactly one")
-        self.set_map(TOPIC + BRIDGE)
-        self.assert_refused(EMPTY, "cannot remove")
-        self.assert_refused(TOPIC + CONTINUED.replace("token", "tokens"), "cannot rewrite")
-        self.set_map(TOPIC + DIRECT + BRIDGE)
-        self.assert_refused(TOPIC + CONTINUED + DIRECT, "cannot reorder")
-
-    def test_repeat_application_is_idempotent(self):
-        self.set_map(TOPIC + BRIDGE)
-        result = self.apply(TOPIC + BRIDGE, EMPTY.encode())
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "unchanged")
+    def test_missing_turn_id_is_reported(self):
+        event = self.event("UserPromptSubmit")
+        del event["turn_id"]
+        self.assertIn("systemMessage", run(event, self.project))
 
 
 if __name__ == "__main__":
