@@ -1,13 +1,71 @@
 #!/usr/bin/env python3
 """Validate a compact tree containing only established understanding."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path
 import re
+import sys
+import subprocess
 import tempfile
+import time
+
+if sys.version_info < (3, 9):
+    raise SystemExit("Project Cognition Map requires Python 3.9+ (Windows: py -3.9).")
 
 EMPTY = "# 已掌握\n"
+
+
+def ignore_runtime(root):
+    git = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute",
+                          "--git-path", "info/exclude"], capture_output=True,
+                         text=True, encoding="utf-8")
+    if git.returncode != 0:
+        return
+    exclude = Path(git.stdout.strip())
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    lines = existing.splitlines()
+    for rule in ("/.know/", "/.codex/hooks.before-cognition.json", "/.codex/cognition-install.lock"):
+        if rule not in lines:
+            lines.append(rule)
+    updated = ("\n".join(lines) + "\n").encode()
+    if not exclude.exists() or exclude.read_bytes() != updated:
+        atomic_write(exclude, updated)
+
+
+@contextmanager
+def file_lock(path):
+    """An OS-owned lock: released even if the process is interrupted."""
+    with Path(path).open("a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+            if lock.seek(0, os.SEEK_END) == 0:
+                lock.write(b"\0")
+                lock.flush()
+            deadline = time.monotonic() + 5
+            while True:
+                lock.seek(0)
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("cognition map is busy; retry later")
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def validate(raw):
@@ -32,7 +90,8 @@ def validate(raw):
             if topic is not None and topic_count == 0:
                 raise ValueError("empty topic")
             topic = line[3:]
-            if not topic or topic != topic.strip() or topic in topics:
+            if (not 1 <= len(topic) <= 80 or topic != topic.strip() or topic in topics
+                    or re.search(r"[<>\[\]|]", topic)):
                 raise ValueError("invalid or duplicate topic")
             topics.add(topic)
             path = []

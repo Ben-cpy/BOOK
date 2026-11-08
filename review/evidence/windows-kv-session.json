@@ -1,0 +1,125 @@
+{
+  "cli": "0.164.0",
+  "platform": "Windows",
+  "python": "3.9.13",
+  "configured_model": "gpt-6-astra",
+  "reasoning_effort": "low",
+  "kind": "synthetic user prompts, real Codex CLI and model responses",
+  "turns": [
+    {
+      "label": "first",
+      "prompt": "我在看一个大模型推理服务的性能实验。Prefill 和 decode 分别在做什么？为什么要分开看首 token 延迟 TTFT 和后续每 token 延迟 TPOT？用简短的一段说明。",
+      "session_id": "01a1bae8-8011-7aa2-8689-0a262cf4ed4e",
+      "turn_id": "01a1bae8-80df-7820-a496-51463edcff70",
+      "messages": [
+        "**Prefill** 是模型并行处理整段输入、建立 KV 缓存并生成第一个 token 的阶段；**decode** 则利用缓存，每次生成一个新 token，再接着生成下一个。两者的工作方式和性能瓶颈不同，所以要分开看：**TTFT（首 token 延迟）**衡量“等多久开始有回复”，包含排队、输入处理等耗时，通常受输入长度影响较大；**TPOT（后续每 token 延迟）**衡量“开始回复后输出有多快”，体现逐步生成的速度。只看总耗时，会混淆“开头等得久”和“后面生成慢”这两种体验。"
+      ],
+      "injected_map": "# 已掌握\n",
+      "model_wrote_candidate": false,
+      "stop_events": [
+        {
+          "stop_hook_active": false,
+          "map_before": "# 已掌握\n",
+          "map_after": "# 已掌握\n",
+          "output": {},
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "label": "second",
+      "prompt": "那这组实验里，TTFT 从 800ms 降到 200ms，TPOT 仍是 25ms，我会先判断输入处理变快了，而不是后续逐 token 生成变快了。现在想看前缀缓存：同一篇长文档发两次，是不是第二次就能省掉处理这篇文档的计算？",
+      "session_id": "01a1bae8-8011-7aa2-8689-0a262cf4ed4e",
+      "turn_id": "01a1bae9-1db0-7dc0-8da4-fdf5f02cb85a",
+      "messages": [
+        "这个判断方向对，但 TTFT 下降也可能来自排队时间缩短；仅凭这两个指标，还不能确定是输入计算变快了。\n",
+        "**可以省掉命中前缀的大部分 prefill 计算，但不是“同一篇文档”就一定命中。**前缀缓存复用的是已有的 KV 缓存，通常要求从输入开头起 token 序列一致，且服务已启用缓存、缓存仍在并能被这次请求访问。例如两次都是“相同系统提示＋相同长文档＋不同问题”，文档部分就有机会复用；如果把不同问题放在文档前面，通常就无法复用后面的文档计算。新问题仍需处理，回答仍需逐 token 生成，所以收益主要体现在 TTFT，TPOT 不一定下降。另外，你的判断方向正确，但 TTFT 从 800ms 降到 200ms 也可能包含排队时间缩短，不能仅凭它确定输入计算变快了。",
+        "我会仅调整指定文件的格式。\n",
+        "已仅修改指定候选文件，采用主题标题和普通嵌套列表。"
+      ],
+      "injected_map": "# 已掌握\n",
+      "model_wrote_candidate": true,
+      "stop_events": [
+        {
+          "stop_hook_active": false,
+          "map_before": "# 已掌握\n",
+          "map_after": "# 已掌握\n",
+          "output": {
+            "decision": "block",
+            "reason": "Correct only the cognition candidate at <project>\\.know\\pending\\efae2c714d265d5fd8ebdc63aacbdc59\\candidate.md: use topic headings and plain nested bullets"
+          },
+          "exit_code": 0
+        },
+        {
+          "stop_hook_active": true,
+          "map_before": "# 已掌握\n",
+          "map_after": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n",
+          "output": {},
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "label": "third",
+      "prompt": "输入阶段和输出阶段我能分开看了；这次先固定排队条件。你说不同问题放在文档前面就不能复用后面的文档，我还没想通：明明那篇文档的文字一个字没变，为什么换了开头，后面已经算过的 KV 就不能接着用？",
+      "session_id": "01a1bae8-8011-7aa2-8689-0a262cf4ed4e",
+      "turn_id": "01a1baea-f15d-7ff3-b9c5-937e94efa9fc",
+      "messages": [
+        "因为 **KV 缓存保存的是文档在当时上下文中的计算结果，不只是文档文字本身。**在常见的因果 Transformer 中，文档里的 token 会关注它前面的内容；这些信息进入隐藏状态，又影响后续层的 K、V。因此，即使文档一个字没变，前面的问题换了，文档对应的 KV 也通常会变。直接复用旧 KV，就相当于带入了旧问题的上下文。\n\n比如：\n\n- **问题 A＋文档 → 问题 B＋文档**：文档前面的上下文变了，通常需要重新计算文档的 KV。\n- **文档＋问题 A → 文档＋问题 B**：文档看不到后面的问题，因此文档部分的 KV 可以复用。\n\n所以前缀缓存要求的是**从开头到复用位置的 token 都一致**，仅有中间某段文字相同还不够。"
+      ],
+      "injected_map": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n",
+      "model_wrote_candidate": false,
+      "stop_events": [
+        {
+          "stop_hook_active": false,
+          "map_before": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n",
+          "map_after": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n",
+          "output": {},
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "label": "fourth",
+      "prompt": "那我把相同系统提示和文档放前面，把每次变化的问题放最后；这样文档看到的前文相同，才有机会复用。我按这个排了请求。接着看 vLLM 的完整块缓存：如果块大小是 16 token，公共前缀有 35 token，末尾只填了 3 个位置，这半块在下一次请求里怎么算？",
+      "session_id": "01a1bae8-8011-7aa2-8689-0a262cf4ed4e",
+      "turn_id": "01a1baec-8a41-7bd3-bb3c-038b07f9bd78",
+      "messages": [
+        "我查一下 vLLM 对完整块复用的说明，确认这 3 个 token 在下一次请求中的处理方式。\n",
+        "按你说的 **16 token 完整块缓存**规则，公共前缀 35 token 中，下一次请求能复用前 **32 token（两个完整块）**，剩下的 **3 token 要重新计算 KV**，再继续处理新问题。[vLLM 官方说明](https://docs.vllm.ai/en/stable/design/prefix_caching/)\n\n```text\n公共前缀：[16 token][16 token][3 token]\n下次请求：[  复用  ][  复用  ][重算这 3 个＋新问题……]\n```\n\n这 3 个 token 的上下文没变，**理论上 KV 仍然有效，只是完整块缓存不单独复用不满一块的部分**。即使上次请求用后续问题填满了第三块，只要两次问题使这一块的内容不同，也不能命中整个块。重算这 3 个时会读取前 32 个的缓存，无须重算前 32 个。"
+      ],
+      "injected_map": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n",
+      "model_wrote_candidate": true,
+      "stop_events": [
+        {
+          "stop_hook_active": false,
+          "map_before": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n",
+          "map_after": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n- 前缀缓存\n  - KV 对前文上下文的依赖\n  - 固定系统提示与文档在前、变化问题在后的请求排列\n",
+          "output": {},
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "label": "fifth",
+      "prompt": "我会把这个例子的预期写成：命中两个完整块，前 32 token 不重算，后 3 token 连同新问题继续计算；即使上次第三块被填满，只要后面的新问题改变了这一块，仍不能把那整块拿来命中。接下来测 32、35、48 token 三种公共前缀，保持问题在末尾、控制排队条件。这个实验设置还缺什么控制项？",
+      "session_id": "01a1bae8-8011-7aa2-8689-0a262cf4ed4e",
+      "turn_id": "01a1baee-c12e-7ba0-9453-8c5c3763e261",
+      "messages": [
+        "还需要核实实际 token 边界，并把缓存预热和模型预热分开控制；否则测到的差异不一定来自完整块命中。我会结合 vLLM 的说明整理控制项。\n",
+        "你的预期正确。还应补上这几项控制：\n\n- **核对真正的 token 前缀**：32、35、48 要按完整请求经过聊天模板、分词后的 token ID 计算，包含系统提示和特殊 token；确保两次请求恰好从第 33、36、49 个 token 开始不同，避免问题开头相同导致额外命中。\n- **固定运行配置**：模型、tokenizer、vLLM 版本、硬件、精度和调度配置一致；明确启用前缀缓存，并确认实际缓存匹配粒度为 16 token。\n- **每轮独立准备缓存**：先完成模型和算子预热，再清理前缀缓存；发送预填充缓存的请求，等它完成后再测第二次请求。固定同一服务实例，避免缓存被驱逐及不同轮次互相命中。\n- **增加配对基线**：每种长度都比较“缓存未命中”和“缓存已命中”，使用同一个待测请求。跨长度直接比较 TTFT，会混入输入长度变化。\n- **固定其他工作量与测量口径**：问题的 token 数、生成参数及输出长度一致；先用单并发、无后台负载，统一 TTFT 的计时起止点。重复多轮、打乱组别顺序，报告中位数和波动范围。\n\n按完整块规则，缓存可用且公共前缀长度精确时，应先验证以下结果，而非只看 TTFT：[vLLM 缓存设计](https://docs.vllm.ai/en/stable/design/prefix_caching/)\n\n| 公共前缀 | 预期命中块数 | 复用 token | 公共部分需重算 |\n|---|---:|---:|---:|\n| 32 | 2 | 32 | 0 |\n| 35 | 2 | 32 | 3 |\n| 48 | 3 | 48 | 0 |\n\n**这些输入很短，节省的计算可能被固定开销和噪声盖住。**因此记录实际缓存命中 token 数；不要预设 48-token 组的 TTFT 一定最低。"
+      ],
+      "injected_map": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n- 前缀缓存\n  - KV 对前文上下文的依赖\n  - 固定系统提示与文档在前、变化问题在后的请求排列\n",
+      "model_wrote_candidate": true,
+      "stop_events": [
+        {
+          "stop_hook_active": false,
+          "map_before": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n- 前缀缓存\n  - KV 对前文上下文的依赖\n  - 固定系统提示与文档在前、变化问题在后的请求排列\n",
+          "map_after": "# 已掌握\n\n## 大模型推理性能\n\n- Prefill 与 decode 的阶段区别\n- TTFT 与 TPOT\n  - 延迟体验与指标区分\n- 前缀缓存\n  - KV 对前文上下文的依赖\n  - 固定系统提示与文档在前、变化问题在后的请求排列\n  - 完整块命中与不足一块的公共前缀重算\n  - 块内后续 token 变化对整块命中的影响\n",
+          "output": {},
+          "exit_code": 0
+        }
+      ]
+    }
+  ]
+}
