@@ -86,17 +86,13 @@ def run(event, project=None):
             atomic_write(base, current)
             candidate = pending / "candidate.md"
             context = (
-                SKILL.read_text(encoding="utf-8").replace(
-                    "references/map-format.md", str(SKILL.parent / "references/map-format.md"))
+                SKILL.read_text(encoding="utf-8").rstrip()
                 + "\n\nCurrent project map\n" + text
-                + "\nProject scope: " + str(root) + ". Use only this project's map; "
-                + "do not import knowledge from other projects."
-                + "\n\nIf this user turn changes what can be assumed understood, write the complete "
-                + "updated Markdown to " + str(candidate)
-                + ". Otherwise create no candidate. The Stop hook validates and saves the candidate. "
-                + "Write UTF-8 without BOM, LF newlines and a final newline. "
-                + "Do not write map.md directly. Complete candidate writes before your final answer. "
-                + "Use ordinary dialogue as evidence. Do not ask for a quiz or learning confirmation."
+                + "\nProject root: " + str(root)
+                + "\nIf the boundary changes, write the full updated map only to "
+                + f"`{candidate}` before the final answer. Stop validates and saves it. "
+                + "For syntax, see the Map format section of "
+                + f"`{SKILL.parent / 'references/map-format.md'}`."
             )
             return {"hookSpecificOutput": {"hookEventName": name, "additionalContext": context}}
         candidate = pending / "candidate.md"

@@ -1,4 +1,4 @@
 interface:
   display_name: "Project Cognition Map"
-  short_description: "Adapt project explanations with timely, brief reminders."
+  short_description: "Explain from the user's current project knowledge boundary."
   default_prompt: "Use @adapt-project-explanations to answer my project question from the right starting point."
